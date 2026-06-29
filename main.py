@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import secrets
 import socket
 import tempfile
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 import qrcode
@@ -36,6 +38,14 @@ PREVIEWABLE = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
     ".heic", ".heif", ".avif", ".svg",
 }
+
+# NTFS forbids these characters in a filename, plus ASCII control chars.
+_ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# Reserved Windows device names (case-insensitive), checked against the stem.
+_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL"}
+_RESERVED_NAMES |= {f"COM{i}" for i in range(1, 10)}
+_RESERVED_NAMES |= {f"LPT{i}" for i in range(1, 10)}
+MAX_NAME_LEN = 200
 
 
 class Config:
@@ -91,13 +101,66 @@ async def auth_gate(request: Request, call_next):
 
 
 # --------------------------------------------------------------------------- #
+# Security headers: applied to every response, including the auth gate's.
+# The CSP keeps 'unsafe-inline' for style and script because the UI is a single
+# inline page by design (no external assets), per CLAUDE.md.
+# --------------------------------------------------------------------------- #
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy": (
+        "default-src 'self'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; base-uri 'none'; form-action 'self'; "
+        "frame-ancestors 'none'"
+    ),
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for key, value in _SECURITY_HEADERS.items():
+        response.headers[key] = value
+    return response
+
+
+# --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 def sanitize(name: str) -> str:
-    """Reduce a client filename to a safe basename."""
-    name = Path(name).name.strip()
+    """Reduce a client filename to a safe basename for NTFS.
+
+    iOS can send names with characters or reserved device names that Windows
+    rejects, so normalize aggressively before writing.
+    """
+    # Take the last path segment by hand. Path(...).name is OS-aware and would
+    # treat a leading "a:" as a drive letter on Windows, dropping it.
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    # Replace illegal characters and ASCII control characters.
+    name = _ILLEGAL_CHARS.sub("_", name)
+    # Strip surrounding whitespace, then trailing dots and spaces (NTFS forbids
+    # a trailing dot or space).
+    name = name.strip().rstrip(". ")
+
     if not name or name in {".", ".."}:
         return "upload.bin"
+
+    # Prefix reserved device names so the stem is no longer reserved.
+    stem = name.split(".", 1)[0]
+    if stem.upper() in _RESERVED_NAMES:
+        name = "_" + name
+
+    # Cap the total length, preserving the extension where possible.
+    if len(name) > MAX_NAME_LEN:
+        suffix = Path(name).suffix
+        if len(suffix) < MAX_NAME_LEN:
+            stem_part = name[: MAX_NAME_LEN - len(suffix)]
+            name = stem_part + suffix
+        else:
+            name = name[:MAX_NAME_LEN]
+
     return name
 
 
@@ -122,6 +185,38 @@ def resolve_in_shared(name: str) -> Path:
     return target
 
 
+def require_airbridge_header(request: Request) -> None:
+    """CSRF defense in depth: require a custom header on state-changing calls.
+
+    A custom header forces a CORS preflight that the server never grants
+    cross-origin, so a cross-site page cannot reach these endpoints even with a
+    valid session cookie.
+    """
+    if request.headers.get("X-AirBridge") != "1":
+        raise HTTPException(status_code=403, detail="Missing X-AirBridge header")
+
+
+def human_size(num: int) -> str:
+    """Format a byte count as a short human-readable string."""
+    size = float(num)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            precision = 0 if unit == "B" else 1
+            return f"{size:.{precision}f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def log_transfer(
+    request: Request, action: str, name: str, size: int | None = None
+) -> None:
+    """Print one concise line per transfer to stdout."""
+    ip = request.client.host if request.client else "?"
+    stamp = datetime.now().strftime("%H:%M:%S")
+    detail = f" ({human_size(size)})" if size is not None else ""
+    print(f"[{stamp}] {ip} {action:<4} {name}{detail}", flush=True)
+
+
 # --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
@@ -131,7 +226,8 @@ async def index() -> str:
 
 
 @app.post("/api/upload")
-async def upload(files: list[UploadFile] = File(...)):
+async def upload(request: Request, files: list[UploadFile] = File(...)):
+    require_airbridge_header(request)
     saved = []
     for upload_file in files:
         name = sanitize(upload_file.filename or "upload.bin")
@@ -140,6 +236,7 @@ async def upload(files: list[UploadFile] = File(...)):
             while chunk := await upload_file.read(CHUNK):
                 out.write(chunk)
         await upload_file.close()
+        log_transfer(request, "UP", dest.name, dest.stat().st_size)
         saved.append(dest.name)
     return {"saved": saved, "count": len(saved)}
 
@@ -174,16 +271,17 @@ async def raw(name: str):
 
 
 @app.get("/api/download/{name}")
-async def download(name: str):
+async def download(request: Request, name: str):
     """Serve a file as an attachment (triggers a save on the phone)."""
     path = resolve_in_shared(name)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
+    log_transfer(request, "DOWN", path.name, path.stat().st_size)
     return FileResponse(path, filename=path.name)
 
 
 @app.get("/api/download-all")
-async def download_all():
+async def download_all(request: Request):
     files = [p for p in cfg.shared_dir.iterdir() if p.is_file()]
     if not files:
         raise HTTPException(status_code=404, detail="No files to download")
@@ -193,9 +291,12 @@ async def download_all():
     # already compressed, so store without re-compressing for speed.
     tmp = tempfile.NamedTemporaryFile(prefix="airbridge_", suffix=".zip", delete=False)
     tmp.close()
+    total = 0
     with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as archive:
         for path in files:
+            total += path.stat().st_size
             archive.write(path, arcname=path.name)
+    log_transfer(request, "ALL", f"{len(files)} files", total)
     return FileResponse(
         tmp.name,
         filename="airbridge.zip",
@@ -205,11 +306,13 @@ async def download_all():
 
 
 @app.delete("/api/files/{name}")
-async def delete_file(name: str):
+async def delete_file(request: Request, name: str):
+    require_airbridge_header(request)
     path = resolve_in_shared(name)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     path.unlink()
+    log_transfer(request, "DEL", path.name)
     return {"deleted": path.name}
 
 
@@ -243,7 +346,12 @@ def print_banner(url: str, base: str, port: int) -> None:
     qr = qrcode.QRCode(border=1)
     qr.add_data(url)
     qr.make(fit=True)
-    qr.print_ascii(invert=True)
+    try:
+        qr.print_ascii(invert=True)
+    except UnicodeEncodeError:
+        # Some Windows consoles use cp1252 and cannot encode the block glyphs.
+        # Fall back to just the URL below, which is printed regardless.
+        print("  (QR code needs a UTF-8 console. Open the URL below instead.)")
     print()
     print(f"  Or open in Safari:  {url}")
     print(f"  Shared folder:      {cfg.shared_dir}")

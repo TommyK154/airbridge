@@ -396,6 +396,7 @@
       var fd = new FormData();
       fd.append("files", file, file.name);
       xhr.open("POST", "/api/upload");
+      xhr.setRequestHeader("X-AirBridge", "1");
       xhr.upload.onprogress = function (e) {
         if (e.lengthComputable) {
           item.fill.style.width = (e.loaded / e.total * 100) + "%";
@@ -492,7 +493,10 @@
 
   function deleteFile(name, row) {
     if (!confirm("Delete \"" + name + "\" from the PC?")) return;
-    fetch("/api/files/" + encodeURIComponent(name), { method: "DELETE" })
+    fetch("/api/files/" + encodeURIComponent(name), {
+      method: "DELETE",
+      headers: { "X-AirBridge": "1" },
+    })
       .then(function (r) {
         if (r.ok) { row.remove(); loadFiles(); }
         else alert("Could not delete that file.");

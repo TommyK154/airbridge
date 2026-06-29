@@ -4,6 +4,8 @@ REM Requires uv on PATH:  https://docs.astral.sh/uv/
 REM Pass extra options through, e.g.  run.bat --port 9000
 
 cd /d "%~dp0"
+REM Force UTF-8 stdout so the QR code block glyphs render (default console is cp1252).
+set PYTHONIOENCODING=utf-8
 uv run main.py %*
 
 echo.
