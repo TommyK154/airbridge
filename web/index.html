@@ -180,6 +180,7 @@
   }
   .tally { font-family: var(--mono); font-size: 13px; color: var(--muted); }
   .tally b { color: var(--text); font-weight: 600; }
+  .hint { font-size: 12.5px; color: var(--muted); margin: -4px 0 14px; }
   .actions { display: flex; gap: 8px; }
   .btn {
     appearance: none; border: 1px solid var(--hair); background: var(--panel);
@@ -286,6 +287,9 @@
           <button id="btn-all" class="btn accent" disabled>Download all</button>
           <button id="btn-refresh" class="btn">Refresh</button>
         </div>
+      </div>
+      <div id="bulk-hint" class="hint" hidden>
+        Downloading many or large files? Use Download all for one reliable connection.
       </div>
       <div id="list" class="list"></div>
     </section>
@@ -488,6 +492,7 @@
         " &middot; <b>" + fmtSize(total) + "</b>"
       : "<b>0</b> files";
     $("btn-all").disabled = files.length === 0;
+    $("bulk-hint").hidden = files.length <= 1;
 
     if (!files.length) {
       listEl.innerHTML =

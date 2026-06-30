@@ -11,5 +11,8 @@ dependencies = [
     "qrcode>=7.4",
 ]
 
+[project.optional-dependencies]
+tls = ["cryptography>=42"]
+
 [tool.uv]
 package = false

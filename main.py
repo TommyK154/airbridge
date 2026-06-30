@@ -335,6 +335,58 @@ async def delete_file(request: Request, name: str):
 # --------------------------------------------------------------------------- #
 # Startup banner
 # --------------------------------------------------------------------------- #
+def ensure_self_signed(ip: str, cert_path: Path, key_path: Path) -> None:
+    """Create a cached self-signed cert and key on first use, if missing.
+
+    The Subject Alternative Name includes the LAN IP and 127.0.0.1, which iOS
+    requires or it rejects the certificate. cryptography ships in the optional
+    'tls' extra and is imported lazily so the core install stays lean.
+    """
+    if cert_path.exists() and key_path.exists():
+        return
+    try:
+        import datetime as _dt
+        import ipaddress
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+    except ImportError:
+        raise SystemExit(
+            "HTTPS needs the optional 'tls' extra. "
+            "Run: uv run --extra tls main.py --https"
+        )
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "AirBridge")])
+    san = [
+        x509.DNSName("localhost"),
+        x509.IPAddress(ipaddress.ip_address(ip)),
+        x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+    ]
+    now = _dt.datetime.now(_dt.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - _dt.timedelta(minutes=5))
+        .not_valid_after(now + _dt.timedelta(days=825))
+        .add_extension(x509.SubjectAlternativeName(san), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    key_path.write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+
+
 def get_lan_ip() -> str:
     """Best-effort LAN IP by inspecting the route toward the internet.
 
@@ -412,6 +464,11 @@ def main() -> None:
         default=0,
         help="Per-file upload size cap in MB (default 0, meaning unlimited)",
     )
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        help="Serve over HTTPS with a cached self-signed cert (needs the 'tls' extra)",
+    )
     args = parser.parse_args()
 
     cfg.shared_dir = Path(args.dir).expanduser().resolve()
@@ -422,11 +479,22 @@ def main() -> None:
     cfg.max_bytes = cfg.max_mb * 1024 * 1024
 
     ip = get_lan_ip()
-    base = f"http://{ip}:{args.port}"
+    ssl_kwargs: dict[str, str] = {}
+    scheme = "http"
+    if args.https:
+        cert_dir = BASE_DIR / ".airbridge"
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        cert_path = cert_dir / "cert.pem"
+        key_path = cert_dir / "key.pem"
+        ensure_self_signed(ip, cert_path, key_path)
+        ssl_kwargs = {"ssl_certfile": str(cert_path), "ssl_keyfile": str(key_path)}
+        scheme = "https"
+
+    base = f"{scheme}://{ip}:{args.port}"
     url = base + (f"/?t={cfg.token}" if cfg.auth_enabled else "/")
 
     print_banner(url, base, args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", **ssl_kwargs)
 
 
 if __name__ == "__main__":
