@@ -364,16 +364,64 @@
     if (e.dataTransfer && e.dataTransfer.files) handleFiles(e.dataTransfer.files);
   });
 
+  /* Keep the screen awake during transfers. iOS can suspend a backgrounded or
+     screen-locked Safari tab mid-upload, which stalls the queue. */
+  var wakeLock = null;
+  var transfersRunning = false;
+
+  function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    navigator.wakeLock.request("screen").then(function (lock) {
+      wakeLock = lock;
+      wakeLock.addEventListener("release", function () { wakeLock = null; });
+    }).catch(function () { /* denied or unavailable: ignore quietly */ });
+  }
+
+  function releaseWakeLock() {
+    if (wakeLock) { wakeLock.release().catch(function () {}); wakeLock = null; }
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    // iOS releases the lock when the tab is backgrounded; re-acquire on return.
+    if (document.visibilityState === "visible" && transfersRunning && !wakeLock) {
+      acquireWakeLock();
+    }
+  });
+
+  var UPLOAD_CONCURRENCY = 3;
+
   function handleFiles(fileList) {
     var files = Array.prototype.slice.call(fileList);
     if (!files.length) return;
     queueWrap.hidden = false;
-    var chain = Promise.resolve();
-    files.forEach(function (file) {
-      var item = addQueueItem(file);
-      chain = chain.then(function () { return uploadOne(file, item); });
+    // Build all queue items up front in file order so progress bars and the
+    // display order stay stable regardless of which upload finishes first.
+    var tasks = files.map(function (file) {
+      return { file: file, item: addQueueItem(file) };
     });
-    chain.then(function () { /* PC list refreshes when that tab is opened */ });
+    runQueue(tasks, UPLOAD_CONCURRENCY);
+  }
+
+  function runQueue(tasks, limit) {
+    var idx = 0, active = 0;
+    transfersRunning = true;
+    acquireWakeLock();
+    function pump() {
+      if (idx >= tasks.length && active === 0) {
+        transfersRunning = false;
+        releaseWakeLock();
+        return;
+      }
+      while (active < limit && idx < tasks.length) {
+        var t = tasks[idx++];
+        active++;
+        uploadOne(t.file, t.item).then(function () {
+          active--;
+          pump();
+        });
+      }
+    }
+    pump();
   }
 
   function addQueueItem(file) {
@@ -409,7 +457,7 @@
           item.meta.textContent = "sent";
           item.meta.classList.add("done");
         } else {
-          markFail(item);
+          markFail(item, xhr.status === 413 ? "too large" : "failed");
         }
         resolve();
       };
@@ -418,9 +466,9 @@
     });
   }
 
-  function markFail(item) {
+  function markFail(item, reason) {
     item.fill.classList.add("fail");
-    item.meta.textContent = "failed";
+    item.meta.textContent = reason || "failed";
     item.meta.classList.add("fail");
   }
 

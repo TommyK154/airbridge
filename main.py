@@ -54,6 +54,8 @@ class Config:
     shared_dir: Path = BASE_DIR / "shared"
     token: str | None = None
     auth_enabled: bool = True
+    max_mb: int = 0  # per-file upload cap in MB, 0 means unlimited
+    max_bytes: int = 0  # derived from max_mb in main()
 
 
 cfg = Config()
@@ -232,10 +234,24 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
     for upload_file in files:
         name = sanitize(upload_file.filename or "upload.bin")
         dest = unique_path(cfg.shared_dir / name)
+        written = 0
+        exceeded = False
         with dest.open("wb") as out:
             while chunk := await upload_file.read(CHUNK):
+                written += len(chunk)
+                if cfg.max_bytes and written > cfg.max_bytes:
+                    exceeded = True
+                    break
                 out.write(chunk)
         await upload_file.close()
+        if exceeded:
+            # Close happened on leaving the with block, so the partial file can
+            # be removed on Windows before we report the failure.
+            dest.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=413,
+                detail=f"'{name}' exceeds the {cfg.max_mb} MB limit",
+            )
         log_transfer(request, "UP", dest.name, dest.stat().st_size)
         saved.append(dest.name)
     return {"saved": saved, "count": len(saved)}
@@ -390,12 +406,20 @@ def main() -> None:
         action="store_true",
         help="Disable the access token (anyone on the LAN can connect)",
     )
+    parser.add_argument(
+        "--max-mb",
+        type=int,
+        default=0,
+        help="Per-file upload size cap in MB (default 0, meaning unlimited)",
+    )
     args = parser.parse_args()
 
     cfg.shared_dir = Path(args.dir).expanduser().resolve()
     cfg.shared_dir.mkdir(parents=True, exist_ok=True)
     cfg.auth_enabled = not args.no_auth
     cfg.token = None if args.no_auth else secrets.token_urlsafe(9)
+    cfg.max_mb = max(0, args.max_mb)
+    cfg.max_bytes = cfg.max_mb * 1024 * 1024
 
     ip = get_lan_ip()
     base = f"http://{ip}:{args.port}"
