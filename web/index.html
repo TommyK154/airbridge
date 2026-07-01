@@ -477,11 +477,16 @@
   }
 
   /* ---- receive: list / download / delete ---- */
+  var thumbsEnabled = false;
+
   function loadFiles() {
     $("tally").textContent = "Loading...";
     fetch("/api/files")
       .then(function (r) { return r.json(); })
-      .then(function (data) { renderFiles(data.files || []); })
+      .then(function (data) {
+        thumbsEnabled = !!data.thumbnails;
+        renderFiles(data.files || []);
+      })
       .catch(function () { $("tally").textContent = "Could not load files."; });
   }
 
@@ -511,8 +516,9 @@
       var row = document.createElement("div");
       row.className = "row";
 
+      var previewSrc = (thumbsEnabled ? "/api/thumb/" : "/api/raw/") + enc;
       var media = f.previewable
-        ? '<img class="thumb" loading="lazy" alt="" src="/api/raw/' + enc + '">'
+        ? '<img class="thumb" loading="lazy" alt="" src="' + previewSrc + '">'
         : '<div class="badge">' + escapeHtml(f.ext) + '</div>';
 
       row.innerHTML =

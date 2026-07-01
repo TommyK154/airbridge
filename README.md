@@ -95,6 +95,31 @@ and the PC.
 If the PC's LAN IP changes, the cached certificate no longer matches and iOS will
 reject it. See the DHCP reservation tip below to keep the IP stable.
 
+## Optional thumbnails
+
+By default the file list previews images by loading the originals in the browser.
+With the `thumbnails` extra, AirBridge instead generates small JPEG thumbnails
+(longest side 320 px) on the desktop, including for HEIC photos from the iPhone,
+so the gallery loads quickly and HEIC actually previews:
+
+```
+uv run --extra thumbnails main.py
+```
+
+Extras combine, so you can run both at once:
+
+```
+uv run --extra tls --extra thumbnails main.py --https
+```
+
+Thumbnails are cached under the gitignored `.airbridge/thumbs/` folder and reused
+on later requests. Without the extra, behavior is unchanged (the list previews the
+original files, with a type badge fallback).
+
+Wheel note: if `pillow-heif` has no prebuilt wheel for the Python that uv selects,
+pin the environment to a supported version (for example `uv venv --python 3.12`)
+before installing the extra, or skip the extra.
+
 ## Tips
 
 - **Keep the URL stable:** set a DHCP reservation for the PC in your router so it

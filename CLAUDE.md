@@ -50,4 +50,3 @@ on Windows (PowerShell), not under WSL2.
 - `pyproject.toml` ..... uv project and dependencies.
 - `run.bat` ............ Windows launcher (`uv run main.py %*`).
 - `README.md` .......... setup, usage, troubleshooting.
-- `HARDENING.md` ....... the current change spec (delete when complete).

@@ -7,6 +7,9 @@ with the phone camera and the transfer page opens.
 from __future__ import annotations
 
 import argparse
+import functools
+import hashlib
+import importlib.util
 import os
 import re
 import secrets
@@ -31,6 +34,7 @@ BASE_DIR = Path(__file__).parent
 WEB_DIR = BASE_DIR / "web"
 CHUNK = 1 << 20  # 1 MiB streaming chunk
 SESSION_COOKIE = "airbridge_session"
+THUMB_MAX = 320  # longest side, in pixels, of a generated thumbnail
 
 # File suffixes worth offering an inline preview for. The browser does the
 # rendering, so a failed load falls back to a type badge on the client side.
@@ -187,6 +191,41 @@ def resolve_in_shared(name: str) -> Path:
     return target
 
 
+@functools.lru_cache(maxsize=1)
+def thumbnails_available() -> bool:
+    """True when the optional 'thumbnails' extra (Pillow) is installed.
+
+    Uses find_spec so Pillow is not imported into memory just to check; the
+    actual import happens lazily in the thumbnail endpoint. HEIC support is
+    added there by registering pillow-heif when it is present.
+    """
+    return importlib.util.find_spec("PIL") is not None
+
+
+def build_thumbnail(src: Path, dest: Path) -> None:
+    """Write a small JPEG thumbnail of src to dest (longest side THUMB_MAX).
+
+    Imports Pillow lazily and registers the HEIC opener if pillow-heif is
+    available. Raises on any decode or unsupported-format error so the caller
+    can fall back to serving the original file.
+    """
+    from PIL import Image, ImageOps
+
+    try:
+        import pillow_heif
+
+        pillow_heif.register_heif_opener()
+    except ImportError:
+        pass  # HEIC will simply not decode; other formats still work.
+
+    with Image.open(src) as img:
+        img = ImageOps.exif_transpose(img)
+        img = img.convert("RGB")
+        img.thumbnail((THUMB_MAX, THUMB_MAX))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        img.save(dest, "JPEG", quality=80)
+
+
 def require_airbridge_header(request: Request) -> None:
     """CSRF defense in depth: require a custom header on state-changing calls.
 
@@ -274,7 +313,7 @@ async def list_files():
             }
         )
     items.sort(key=lambda item: item["modified"], reverse=True)
-    return {"files": items}
+    return {"files": items, "thumbnails": thumbnails_available()}
 
 
 @app.get("/api/raw/{name}")
@@ -284,6 +323,37 @@ async def raw(name: str):
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(path, content_disposition_type="inline")
+
+
+@app.get("/api/thumb/{name}")
+async def thumb(name: str):
+    """Serve a small JPEG thumbnail for an image, generating and caching it.
+
+    Falls back to serving the original file inline when the thumbnails extra is
+    not installed or the image cannot be decoded (for example SVG), so a preview
+    still appears and the client badge fallback still applies.
+    """
+    path = resolve_in_shared(name)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    if not thumbnails_available():
+        return FileResponse(path, content_disposition_type="inline")
+
+    mtime_ns = path.stat().st_mtime_ns
+    key = hashlib.sha1(f"{path.name}\x00{mtime_ns}".encode()).hexdigest()
+    cache_path = BASE_DIR / ".airbridge" / "thumbs" / f"{key}.jpg"
+
+    if not cache_path.is_file():
+        try:
+            build_thumbnail(path, cache_path)
+        except Exception:
+            # Unsupported format or decode error: serve the original inline.
+            return FileResponse(path, content_disposition_type="inline")
+
+    return FileResponse(
+        cache_path, media_type="image/jpeg", content_disposition_type="inline"
+    )
 
 
 @app.get("/api/download/{name}")
