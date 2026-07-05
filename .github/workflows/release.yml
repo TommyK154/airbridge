@@ -24,7 +24,16 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run tests
-        run: uv run pytest -q
+        shell: pwsh
+        run: |
+          uv run pytest -q 2>&1 | Tee-Object pytest.log
+          if ($LASTEXITCODE -ne 0) {
+            # Surface the failure tail as an annotation so it is readable
+            # from the public API without downloading logs.
+            $tail = (Get-Content pytest.log -Tail 40) -join "%0A"
+            Write-Output "::error title=pytest failed::$tail"
+            exit 1
+          }
 
       - name: Resolve version
         id: version
