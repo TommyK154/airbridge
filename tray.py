@@ -86,7 +86,9 @@ def save_config(config: dict) -> None:
 # Windows login autostart via HKCU\...\CurrentVersion\Run
 # --------------------------------------------------------------------------- #
 def set_run_value(command: str) -> None:
-    with winreg.OpenKey(
+    # CreateKeyEx opens the key or creates it: a fresh user profile can
+    # legitimately lack the Run key entirely.
+    with winreg.CreateKeyEx(
         winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE
     ) as key:
         winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, command)
