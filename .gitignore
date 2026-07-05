@@ -1,4 +1,5 @@
 ﻿shared/
+testshare/
 .venv/
 uv.lock
 __pycache__/
