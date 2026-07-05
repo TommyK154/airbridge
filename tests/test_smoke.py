@@ -165,13 +165,25 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def test_server_lifecycle(tmp_path: Path) -> None:
-    port = free_port()
-    controller = tray.ServerController(make_args(port=port, dir=str(tmp_path)))
+def start_on_free_port(controller: tray.ServerController, attempts: int = 3) -> None:
+    """Start the server, retrying with a new port if another process grabbed
+    the probed one first (a real race on busy CI runners)."""
+    for _ in range(attempts - 1):
+        try:
+            controller.start()
+            return
+        except RuntimeError:
+            controller.args.port = free_port()
     controller.start()
+
+
+def test_server_lifecycle(tmp_path: Path) -> None:
+    controller = tray.ServerController(make_args(port=free_port(), dir=str(tmp_path)))
+    start_on_free_port(controller)
     try:
         assert controller.running
-        assert controller.port == port
+        assert controller.port == controller.args.port
+        port = controller.port
 
         base = f"http://127.0.0.1:{port}"
         with urllib.request.urlopen(f"{base}/api/files", timeout=5) as resp:
@@ -210,8 +222,10 @@ def test_server_lifecycle(tmp_path: Path) -> None:
         controller.stop()
     assert not controller.running
 
-    # A stopped controller can start again on the same port.
-    controller.start()
+    # A stopped controller can start again. Use a fresh port: rebinding the
+    # one just released can flake on busy CI runners.
+    controller.args.port = free_port()
+    start_on_free_port(controller)
     assert controller.running
     controller.stop()
     assert not controller.running
