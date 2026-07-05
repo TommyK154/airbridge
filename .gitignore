@@ -1,7 +1,9 @@
-﻿shared/
+shared/
 testshare/
 .venv/
-uv.lock
 __pycache__/
 *.pyc
 .airbridge/
+build/
+dist/
+.pytest_cache/

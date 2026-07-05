@@ -1,144 +1,48 @@
 # AirBridge
 
-A LAN-only file and photo bridge between an iPhone and a Windows 10 desktop. A
-small FastAPI server runs on the PC; the phone connects over the same Wi-Fi
-through a browser, with no app to install. Phone uploads land in a shared folder,
-and the phone can download anything in that folder.
+Move photos and files between your iPhone and your Windows PC over your own
+Wi-Fi. No app to install on the phone, no cloud, no account: a tiny server runs
+on the PC, the phone connects through its browser, and nothing ever leaves your
+local network.
 
-Nothing leaves your local network. There is no cloud, no account, and no WAN
-exposure.
+## Install (Windows)
 
-## Requirements
+1. Download `AirBridge-Setup-<version>.exe` from the
+   [latest release](../../releases/latest).
+2. Run it. Windows SmartScreen may show "Windows protected your PC" because the
+   app is not code-signed; click **More info**, then **Run anyway**. This
+   happens once.
+3. Click through the installer. On the last page, leave "Launch AirBridge now"
+   checked.
 
-- Windows 10 (or newer), tested natively on Windows, not WSL2.
-- [uv](https://docs.astral.sh/uv/) on your PATH. There is no separate `python` or
-  `pip` step; uv manages the environment and installs dependencies on first run.
-- The phone and the PC must be on the same Wi-Fi network.
+That's it. An AirBridge icon appears in the system tray (bottom-right, possibly
+behind the `^` chevron), the server starts by itself, and a window pops up with
+a QR code. Point the iPhone camera at it and the transfer page opens in Safari.
 
-## Quick start
+Day-to-day use:
 
-Double-click `run.bat`, or from a terminal in the project folder:
+- **Left-click** the tray icon: show the QR code again.
+- **Right-click**: Start/Stop Server, Show QR, Open in Browser, Open Shared
+  Folder, run-at-login toggle, Exit.
+- Files from the phone land in `C:\Users\<you>\AirBridge` (one click away via
+  **Open Shared Folder**). Anything you drop in that folder can be downloaded
+  by the phone.
+- Each time the server starts it generates a fresh access link, so scan the QR
+  again after a restart.
 
-```
-uv run main.py
-```
+The first time the server runs, Windows Defender Firewall asks to allow
+AirBridge on private networks; allow it, or the phone cannot connect.
 
-On startup the terminal prints a QR code and a URL. Scan the QR with the iPhone
-camera (or open the URL in Safari) and the transfer page loads. The first launch
-installs dependencies automatically.
+## What it does
 
-By default access is gated by a token embedded in the QR link. The phone exchanges
-it for a session cookie, so only devices that scanned the code can connect.
-
-### Running without the token
-
-For quick local testing on a trusted network you can disable the token:
-
-```
-uv run main.py --no-auth
-```
-
-Anyone on the LAN can then connect, so use this only when you trust the network.
-
-## Command-line options
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--port N` | `8080` | Port to listen on. |
-| `--dir PATH` | `./shared` | Shared folder for transferred files. |
-| `--host ADDR` | `0.0.0.0` | Bind address (all interfaces by default). |
-| `--no-auth` | off | Disable the access token (anyone on the LAN can connect). |
-| `--max-mb N` | `0` | Per-file upload size cap in MB. `0` means unlimited. Uploads over the cap are rejected with HTTP 413 and leave nothing on disk. |
-| `--https` | off | Serve over HTTPS with a cached self-signed certificate (needs the `tls` extra, see below). |
-
-`--port` and `--dir` can also be set with the `AIRBRIDGE_PORT` and `AIRBRIDGE_DIR`
-environment variables.
-
-## Downloading files
-
-Each file in the "Files on the PC" list has its own download button. For
-downloading many files, or large ones, use **Download all** instead: it streams a
-single ZIP over one connection, which is faster and more reliable than tapping
-several individual downloads at once. (On iOS, firing many large downloads
-simultaneously can stall one of the connections.)
-
-## Uploading files
-
-Drag files onto the Send panel, or tap to pick them. A batch uploads with a small
-concurrency pool (a few files at a time) with per-file progress. If one file
-fails, the rest of the batch still completes.
-
-While a batch is transferring, AirBridge uses the Screen Wake Lock API where the
-browser supports it (for example Safari on iOS) to keep the phone screen awake so
-a long transfer is not interrupted when the screen would otherwise lock. Browsers
-without the API are unaffected.
-
-## Optional HTTPS
-
-On a home LAN, plain HTTP is fine. On a network you do not fully control, you can
-encrypt the link. HTTPS support lives in an optional extra so the core install
-stays lean:
-
-```
-uv run --extra tls main.py --https
-```
-
-On first use this generates a self-signed certificate and key, caches them under
-a gitignored `.airbridge/` folder, and reuses them on later runs. The certificate
-includes the PC's LAN IP in its Subject Alternative Name, which iOS requires.
-
-The first time the phone connects, Safari shows a one-time warning because the
-certificate is self-signed (not issued by a public authority). This is expected.
-Tapping through to continue still gives you full wire encryption between the phone
-and the PC.
-
-If the PC's LAN IP changes, the cached certificate no longer matches and iOS will
-reject it. See the DHCP reservation tip below to keep the IP stable.
-
-## Optional thumbnails
-
-By default the file list previews images by loading the originals in the browser.
-With the `thumbnails` extra, AirBridge instead generates small JPEG thumbnails
-(longest side 320 px) on the desktop, including for HEIC photos from the iPhone,
-so the gallery loads quickly and HEIC actually previews:
-
-```
-uv run --extra thumbnails main.py
-```
-
-Extras combine, so you can run both at once:
-
-```
-uv run --extra tls --extra thumbnails main.py --https
-```
-
-Thumbnails are cached under the gitignored `.airbridge/thumbs/` folder and reused
-on later requests. Without the extra, behavior is unchanged (the list previews the
-original files, with a type badge fallback).
-
-Wheel note: if `pillow-heif` has no prebuilt wheel for the Python that uv selects,
-pin the environment to a supported version (for example `uv venv --python 3.12`)
-before installing the extra, or skip the extra.
-
-## Tips
-
-- **Keep the URL stable:** set a DHCP reservation for the PC in your router so it
-  always gets the same LAN IP. The connect URL (and, with `--https`, the cached
-  certificate) then stay valid across reboots.
-- **QR code looks blank:** some Windows consoles default to the cp1252 codepage
-  and cannot render the QR block characters. `run.bat` sets `PYTHONIOENCODING=utf-8`
-  so the QR renders. If you launch `uv run main.py` directly in such a console,
-  set that variable first, or just open the printed URL instead.
-
-## Troubleshooting
-
-- **The phone cannot reach the PC:** confirm both devices are on the same Wi-Fi
-  network (not a guest network or a separate band that blocks client-to-client
-  traffic).
-- **Windows Defender Firewall prompt:** allow AirBridge on private networks the
-  first time it binds the port, or the phone will not be able to connect.
-- **Connection refused:** check the port is not already in use, and that you
-  opened the same port shown in the startup banner.
+- Bidirectional transfers: phone to PC uploads, PC to phone downloads, and a
+  one-tap ZIP of everything.
+- Image previews and HEIC thumbnails in the file list.
+- A Links tab for tossing URLs between the phone and the PC.
+- Parallel uploads with per-file progress, and a screen wake lock so long
+  transfers are not interrupted by the phone locking.
+- Access control by default: a token embedded in the QR link is exchanged for a
+  session cookie, so only devices that scanned the code can connect.
 
 ## Security posture
 
@@ -147,3 +51,85 @@ session cookies plus a custom-header check on state-changing requests, sets a
 tight Content-Security-Policy and other security headers, sanitizes all uploaded
 filenames for Windows, and never serves a path outside the shared folder. It does
 nothing to invite WAN exposure (no UPnP, no port forwarding, no public tunnels).
+
+## Troubleshooting
+
+- **The phone cannot reach the PC:** confirm both devices are on the same Wi-Fi
+  network (not a guest network or a band that blocks client-to-client traffic).
+- **No QR window and no tray icon:** check the log at
+  `%LOCALAPPDATA%\AirBridge\tray.log`.
+- **Port already taken:** AirBridge picks the next free port automatically; the
+  QR code and URL always reflect the real address.
+- **Keep the URL stable:** set a DHCP reservation for the PC in your router so
+  it always gets the same LAN IP.
+
+---
+
+## Running from source (developers)
+
+Everything below is for people working on AirBridge itself. Installed users
+never need any of it.
+
+Requirements: Windows, [uv](https://docs.astral.sh/uv/) on PATH. There is no
+separate `python` or `pip` step; uv manages the environment.
+
+```
+uv run main.py              # headless server with QR in the terminal (run.bat)
+tray_run.bat                # the tray app, from source
+uv run pytest               # tests
+```
+
+`main.py` prints the QR and serves until Ctrl+C. The tray app runs the same
+server in the background with start/stop, QR popup, and login-autostart
+toggles; from source it detaches from the console (use `--foreground` to keep
+it attached for debugging) and logs to `.airbridge/tray.log` in the project
+directory.
+
+### Command-line options (both entry points)
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--port N` | `8080` | Port to listen on. The tray falls back to the next free port when the default is busy. |
+| `--dir PATH` | `./shared` | Shared folder for transferred files. |
+| `--host ADDR` | `0.0.0.0` | Bind address (all interfaces by default). |
+| `--no-auth` | off | Disable the access token (anyone on the LAN can connect). |
+| `--max-mb N` | `0` | Per-file upload size cap in MB. `0` means unlimited; over-cap uploads get HTTP 413 and leave nothing on disk. |
+| `--https` | off | Serve over HTTPS with a cached self-signed certificate (needs the `tls` extra). iOS shows a one-time warning for the self-signed cert. |
+
+`--port` and `--dir` can also be set with the `AIRBRIDGE_PORT` and
+`AIRBRIDGE_DIR` environment variables.
+
+### Optional extras
+
+| Extra | Packages | Enables |
+| --- | --- | --- |
+| `tls` | cryptography | `--https`. |
+| `thumbnails` | pillow, pillow-heif | Image and HEIC thumbnails in the file list. |
+| `tray` | pystray, pillow | The `tray.py` entry point. |
+
+Combine with `uv run --extra tls --extra thumbnails main.py --https`, or use
+`--all-extras` for everything (which is what `tray_run.bat` does). The installed
+app bundles all extras, so none of this applies to it.
+
+### Building the installer
+
+CI does this on every version tag (see `.github/workflows/release.yml`):
+PyInstaller bundles the tray app, then Inno Setup wraps it in
+`AirBridge-Setup-<version>.exe`. Locally:
+
+```
+uv run python build_assets/make_ico.py
+uv run pyinstaller airbridge.spec --noconfirm
+ISCC.exe installer.iss /DAppVersion=1.0.0
+```
+
+The frozen app stores its state in `%LOCALAPPDATA%\AirBridge` and shares
+`%USERPROFILE%\AirBridge`; from source, state stays in the project directory
+(`.airbridge/` and `./shared`).
+
+To release: bump `version` in `pyproject.toml`, tag `vX.Y.Z`, push the tag.
+CI runs the tests, builds the installer, and attaches it to a GitHub Release.
+
+## License
+
+[MIT](LICENSE)

@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+import sys
+
 import qrcode
 import uvicorn
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -36,14 +38,30 @@ from fastapi.responses import (
 from starlette.background import BackgroundTask
 
 BASE_DIR = Path(__file__).parent
-WEB_DIR = BASE_DIR / "web"
+
+# Path split between running from source and running as a frozen (PyInstaller)
+# app. Frozen: bundled read-only assets live under sys._MEIPASS, writable state
+# goes to the user profile (never next to the exe), and the default shared
+# folder is a visible folder in the user's home (not Documents, which OneDrive
+# may silently sync to the cloud; this is a LAN-only tool). From source:
+# everything stays inside the project directory, exactly as before.
+FROZEN = bool(getattr(sys, "frozen", False))
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", BASE_DIR))
+WEB_DIR = RESOURCE_DIR / "web"
+if FROZEN:
+    DATA_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "AirBridge"
+    DEFAULT_SHARED_DIR = Path.home() / "AirBridge"
+else:
+    DATA_DIR = BASE_DIR / ".airbridge"
+    DEFAULT_SHARED_DIR = BASE_DIR / "shared"
+
 CHUNK = 1 << 20  # 1 MiB streaming chunk
 SESSION_COOKIE = "airbridge_session"
 THUMB_MAX = 320  # longest side, in pixels, of a generated thumbnail
 
-# Shared URL list. Persisted next to the thumbnail cache in the gitignored
-# .airbridge dir so links survive a server restart.
-LINKS_PATH = BASE_DIR / ".airbridge" / "links.json"
+# Shared URL list. Persisted next to the thumbnail cache in the data dir so
+# links survive a server restart.
+LINKS_PATH = DATA_DIR / "links.json"
 LINKS_MAX = 50  # rolling cap; oldest links are dropped past this
 LINKS_URL_MAX = 2048  # reject absurdly long URLs to keep the store bounded
 LINKS_TITLE_MAX = 200
@@ -68,7 +86,7 @@ MAX_NAME_LEN = 200
 class Config:
     """Runtime configuration, populated in main()."""
 
-    shared_dir: Path = BASE_DIR / "shared"
+    shared_dir: Path = DEFAULT_SHARED_DIR
     token: str | None = None
     auth_enabled: bool = True
     max_mb: int = 0  # per-file upload cap in MB, 0 means unlimited
@@ -442,7 +460,7 @@ async def thumb(name: str):
 
     mtime_ns = path.stat().st_mtime_ns
     key = hashlib.sha1(f"{path.name}\x00{mtime_ns}".encode()).hexdigest()
-    cache_path = BASE_DIR / ".airbridge" / "thumbs" / f"{key}.jpg"
+    cache_path = DATA_DIR / "thumbs" / f"{key}.jpg"
 
     if not cache_path.is_file():
         try:
@@ -666,12 +684,12 @@ def main() -> None:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("AIRBRIDGE_PORT", "8080")),
-        help="Port to listen on (default 8080)",
+        default=None,
+        help="Port to listen on (default 8080, or AIRBRIDGE_PORT)",
     )
     parser.add_argument(
         "--dir",
-        default=os.environ.get("AIRBRIDGE_DIR", str(BASE_DIR / "shared")),
+        default=os.environ.get("AIRBRIDGE_DIR", str(DEFAULT_SHARED_DIR)),
         help="Shared folder for transferred files",
     )
     parser.add_argument(
@@ -696,6 +714,11 @@ def main() -> None:
         help="Serve over HTTPS with a cached self-signed cert (needs the 'tls' extra)",
     )
     args = parser.parse_args()
+    port = (
+        args.port
+        if args.port is not None
+        else int(os.environ.get("AIRBRIDGE_PORT", "8080"))
+    )
 
     cfg.shared_dir = Path(args.dir).expanduser().resolve()
     cfg.shared_dir.mkdir(parents=True, exist_ok=True)
@@ -708,19 +731,18 @@ def main() -> None:
     ssl_kwargs: dict[str, str] = {}
     scheme = "http"
     if args.https:
-        cert_dir = BASE_DIR / ".airbridge"
-        cert_dir.mkdir(parents=True, exist_ok=True)
-        cert_path = cert_dir / "cert.pem"
-        key_path = cert_dir / "key.pem"
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        cert_path = DATA_DIR / "cert.pem"
+        key_path = DATA_DIR / "key.pem"
         ensure_self_signed(ip, cert_path, key_path)
         ssl_kwargs = {"ssl_certfile": str(cert_path), "ssl_keyfile": str(key_path)}
         scheme = "https"
 
-    base = f"{scheme}://{ip}:{args.port}"
+    base = f"{scheme}://{ip}:{port}"
     url = base + (f"/?t={cfg.token}" if cfg.auth_enabled else "/")
 
-    print_banner(url, base, args.port)
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", **ssl_kwargs)
+    print_banner(url, base, port)
+    uvicorn.run(app, host=args.host, port=port, log_level="warning", **ssl_kwargs)
 
 
 if __name__ == "__main__":
