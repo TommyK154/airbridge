@@ -25,6 +25,7 @@ on Windows (PowerShell), not under WSL2.
 - Manual test loop: start with `--no-auth --port 8099 --dir ./testshare`, then
   exercise the endpoints with curl (upload, list, download, download-all, delete)
   before testing on the phone.
+- Automated tests: `uv run pytest` (tests/test_smoke.py, no GUI coverage).
 
 ## Conventions
 
@@ -43,10 +44,25 @@ on Windows (PowerShell), not under WSL2.
 - Match the existing style: type hints, small focused functions, docstrings on
   non-obvious behavior.
 
+## Frozen vs source paths
+
+The app also ships as a frozen PyInstaller exe (built by CI). `main.py` defines
+the split: frozen builds keep writable state in `%LOCALAPPDATA%\AirBridge` and
+share `%USERPROFILE%\AirBridge`; from source, state stays in the project dir
+(`.airbridge/`, `./shared`). Use `DATA_DIR`, `WEB_DIR`, `DEFAULT_SHARED_DIR`,
+and `FROZEN` from `main.py` rather than building paths from `BASE_DIR`.
+
 ## File map
 
 - `main.py` ............ FastAPI app: auth middleware, endpoints, QR banner, CLI.
 - `web/index.html` ..... the entire UI (HTML, CSS, JS inline).
-- `pyproject.toml` ..... uv project and dependencies.
+- `tray.py` ............ system tray entry point (server thread, QR popup, login toggles).
+- `pyproject.toml` ..... uv project, dependencies, extras, dev group.
 - `run.bat` ............ Windows launcher (`uv run main.py %*`).
-- `README.md` .......... setup, usage, troubleshooting.
+- `tray_run.bat` ....... tray launcher (syncs all extras, tray.py self-detaches).
+- `tests/` ............. pytest smoke tests (helpers, registry, server lifecycle).
+- `airbridge.spec` ..... PyInstaller build (onedir, windowed, bundles web/).
+- `installer.iss` ...... Inno Setup installer (per-user, start-at-login task).
+- `build_assets/` ...... make_ico.py, generates the .ico from tray.make_icon.
+- `.github/workflows/` . ci.yml (tests) and release.yml (installer on v* tags).
+- `README.md` .......... end-user setup first, developer docs below the fold.

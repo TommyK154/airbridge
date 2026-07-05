@@ -14,6 +14,10 @@ dependencies = [
 [project.optional-dependencies]
 tls = ["cryptography>=42"]
 thumbnails = ["pillow>=10", "pillow-heif>=0.16"]
+tray = ["pystray>=0.19", "pillow>=10"]
+
+[dependency-groups]
+dev = ["pyinstaller>=6.11", "pytest>=8"]
 
 [tool.uv]
 package = false
