@@ -10,14 +10,19 @@ import argparse
 import functools
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import secrets
 import socket
 import tempfile
+import threading
+import time
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import qrcode
 import uvicorn
@@ -35,6 +40,14 @@ WEB_DIR = BASE_DIR / "web"
 CHUNK = 1 << 20  # 1 MiB streaming chunk
 SESSION_COOKIE = "airbridge_session"
 THUMB_MAX = 320  # longest side, in pixels, of a generated thumbnail
+
+# Shared URL list. Persisted next to the thumbnail cache in the gitignored
+# .airbridge dir so links survive a server restart.
+LINKS_PATH = BASE_DIR / ".airbridge" / "links.json"
+LINKS_MAX = 50  # rolling cap; oldest links are dropped past this
+LINKS_URL_MAX = 2048  # reject absurdly long URLs to keep the store bounded
+LINKS_TITLE_MAX = 200
+_links_lock = threading.Lock()  # guards read/modify/write of LINKS_PATH
 
 # File suffixes worth offering an inline preview for. The browser does the
 # rendering, so a failed load falls back to a type badge on the client side.
@@ -259,6 +272,93 @@ def log_transfer(
 
 
 # --------------------------------------------------------------------------- #
+# Shared links: a small persisted list of URLs either device can post, view,
+# open, and delete. Stored as JSON, guarded by _links_lock, capped at LINKS_MAX.
+# --------------------------------------------------------------------------- #
+def load_links() -> list[dict]:
+    """Return the stored links, or an empty list if the file is absent or bad.
+
+    Never raises: a missing or corrupt store is treated as empty so a stray
+    write or manual edit cannot take the endpoints down.
+    """
+    try:
+        data = json.loads(LINKS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_links(links: list[dict]) -> None:
+    """Persist links to LINKS_PATH atomically (temp file then os.replace)."""
+    LINKS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix="links_", suffix=".json", dir=str(LINKS_PATH.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as out:
+            json.dump(links, out, ensure_ascii=False, indent=2)
+        os.replace(tmp_name, LINKS_PATH)
+    except BaseException:
+        os.unlink(tmp_name)
+        raise
+
+
+def link_source(request: Request) -> str:
+    """Guess whether a request came from a phone or the PC by User-Agent.
+
+    Used only as the default source when the client does not submit one, so a
+    coarse substring check is fine.
+    """
+    ua = request.headers.get("user-agent", "")
+    mobile = ("iPhone", "iPad", "iPod", "Android", "Mobile")
+    return "phone" if any(tag in ua for tag in mobile) else "pc"
+
+
+def link_title_fallback(url: str) -> str:
+    """Derive a display title from a URL's host, dropping a leading 'www.'."""
+    netloc = urlparse(url).netloc
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc or url
+
+
+def normalize_url(raw: str) -> str:
+    """Validate and normalize a submitted URL to an http(s) address.
+
+    Trims whitespace, prepends https:// to a bare host (so "example.com" and
+    "host:port" work), and rejects anything that is not http/https with a real
+    host. A non-web scheme such as javascript:, data:, or file: is refused: with
+    an authority (file://...) it is caught by the scheme check, and without one
+    (javascript:alert(1)) prepending https:// leaves a non-numeric "port" that
+    fails to parse.
+    """
+    url = (raw or "").strip()
+    if not url:
+        raise HTTPException(status_code=400, detail="A URL is required")
+    if len(url) > LINKS_URL_MAX:
+        raise HTTPException(status_code=400, detail="URL is too long")
+
+    bad = HTTPException(status_code=400, detail="Only http and https URLs are allowed")
+    if "://" in url:
+        # An explicit scheme with an authority: it must be http or https.
+        if urlparse(url).scheme not in ("http", "https"):
+            raise bad
+    else:
+        # No authority: treat as a bare host and prepend https. A stray scheme
+        # like "javascript:alert(1)" then parses to a bogus, non-numeric port.
+        url = "https://" + url
+
+    parsed = urlparse(url)
+    try:
+        parsed.port  # raises ValueError on a non-numeric port
+    except ValueError:
+        raise bad
+    if not parsed.hostname:
+        raise bad
+    return url
+
+
+# --------------------------------------------------------------------------- #
 # Routes
 # --------------------------------------------------------------------------- #
 @app.get("/", response_class=HTMLResponse)
@@ -400,6 +500,62 @@ async def delete_file(request: Request, name: str):
     path.unlink()
     log_transfer(request, "DEL", path.name)
     return {"deleted": path.name}
+
+
+@app.post("/api/links")
+async def create_link(request: Request):
+    """Add a URL to the shared list. Both phone and PC post here."""
+    require_airbridge_header(request)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Expected a JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object")
+
+    url = normalize_url(body.get("url", ""))
+    title = str(body.get("title") or "").strip()[:LINKS_TITLE_MAX]
+    submitted_source = body.get("source")
+    source = submitted_source if submitted_source in ("phone", "pc") else link_source(request)
+
+    link = {
+        "id": uuid.uuid4().hex,
+        "url": url,
+        "title": title or link_title_fallback(url),
+        "source": source,
+        "created": time.time(),
+    }
+    with _links_lock:
+        links = load_links()
+        links.append(link)
+        # Keep only the newest LINKS_MAX, dropping the oldest from the front.
+        if len(links) > LINKS_MAX:
+            links = links[-LINKS_MAX:]
+        save_links(links)
+    log_transfer(request, "LINK", link["url"])
+    return link
+
+
+@app.get("/api/links")
+async def list_links():
+    """Return the shared links, newest first."""
+    with _links_lock:
+        links = load_links()
+    links.sort(key=lambda item: item.get("created", 0), reverse=True)
+    return {"links": links}
+
+
+@app.delete("/api/links/{link_id}")
+async def delete_link(request: Request, link_id: str):
+    require_airbridge_header(request)
+    with _links_lock:
+        links = load_links()
+        remaining = [link for link in links if link.get("id") != link_id]
+        if len(remaining) == len(links):
+            raise HTTPException(status_code=404, detail="Not found")
+        save_links(remaining)
+    log_transfer(request, "DELL", link_id)
+    return {"deleted": link_id}
 
 
 # --------------------------------------------------------------------------- #

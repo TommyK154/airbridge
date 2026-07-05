@@ -85,7 +85,7 @@
   /* ---- direction switch ---- */
   .switch {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(3, 1fr);
     gap: 6px;
     background: var(--panel);
     border: 1px solid var(--hair);
@@ -117,6 +117,11 @@
   .switch button[aria-selected="true"][data-mode="recv"] {
     background: var(--recv-soft); color: var(--recv);
   }
+  .switch button[aria-selected="true"][data-mode="links"] {
+    background: var(--recv-soft); color: var(--recv);
+  }
+  /* Tighten tab padding a touch so three labels fit comfortably on a phone. */
+  .switch button { padding-left: 6px; padding-right: 6px; }
 
   .view[hidden] { display: none; }
 
@@ -147,6 +152,32 @@
   }
   .dz-title { font-weight: 650; font-size: 16px; }
   .dz-sub { color: var(--muted); font-size: 13px; margin-top: 6px; }
+
+  /* ---- links compose form ---- */
+  .compose {
+    display: flex; flex-direction: column; gap: 8px;
+    background: var(--panel); border: 1px solid var(--hair);
+    border-radius: var(--radius); padding: 14px; margin-bottom: 16px;
+  }
+  .compose input {
+    appearance: none; width: 100%;
+    background: var(--panel-2); border: 1px solid var(--hair);
+    color: var(--text); font-family: var(--mono); font-size: 13px;
+    padding: 11px 12px; border-radius: 9px;
+  }
+  .compose input::placeholder { color: var(--faint); }
+  .compose input:focus-visible { outline: 2px solid var(--recv); outline-offset: 1px; }
+  .compose .add { align-self: flex-end; }
+
+  /* A whole-row link that behaves like a .row but stays tappable. */
+  a.row { text-decoration: none; color: inherit; }
+  a.row:hover { border-color: var(--faint); }
+  .linkface {
+    width: 52px; height: 52px; flex: 0 0 52px;
+    border-radius: 8px; background: var(--panel-2);
+    display: grid; place-items: center;
+    color: var(--recv); font-size: 20px;
+  }
 
   /* ---- transfer queue ---- */
   .queue { margin-top: 18px; display: flex; flex-direction: column; gap: 10px; }
@@ -261,6 +292,9 @@
       <button id="tab-recv" data-mode="recv" role="tab" aria-selected="false">
         <span class="arrow">&#8595;</span> On the PC
       </button>
+      <button id="tab-links" data-mode="links" role="tab" aria-selected="false">
+        <span class="arrow">&#128279;</span> Links
+      </button>
     </div>
 
     <!-- SEND -->
@@ -294,6 +328,24 @@
       <div id="list" class="list"></div>
     </section>
 
+    <!-- LINKS -->
+    <section id="view-links" class="view" role="tabpanel" aria-label="Shared links" hidden>
+      <form id="link-form" class="compose">
+        <input id="link-url" type="url" inputmode="url" autocomplete="off"
+               autocapitalize="off" spellcheck="false" placeholder="Paste or type a URL">
+        <input id="link-title" type="text" autocomplete="off"
+               placeholder="Title (optional)">
+        <button type="submit" class="btn accent add">Add link</button>
+      </form>
+      <div class="toolbar">
+        <div class="tally" id="links-tally">Loading...</div>
+        <div class="actions">
+          <button id="btn-links-refresh" class="btn">Refresh</button>
+        </div>
+      </div>
+      <div id="links-list" class="list"></div>
+    </section>
+
     <div class="foot">LAN only &middot; nothing leaves your network</div>
   </div>
 
@@ -310,16 +362,18 @@
   $("host").textContent = location.host;
 
   /* ---- tab switching ---- */
+  var MODES = ["send", "recv", "links"];
   function setMode(mode) {
-    var send = mode === "send";
-    $("tab-send").setAttribute("aria-selected", String(send));
-    $("tab-recv").setAttribute("aria-selected", String(!send));
-    $("view-send").hidden = !send;
-    $("view-recv").hidden = send;
-    if (!send) loadFiles();
+    MODES.forEach(function (m) {
+      $("tab-" + m).setAttribute("aria-selected", String(m === mode));
+      $("view-" + m).hidden = m !== mode;
+    });
+    if (mode === "recv") loadFiles();
+    if (mode === "links") loadLinks();
   }
-  $("tab-send").addEventListener("click", function () { setMode("send"); });
-  $("tab-recv").addEventListener("click", function () { setMode("recv"); });
+  MODES.forEach(function (m) {
+    $("tab-" + m).addEventListener("click", function () { setMode(m); });
+  });
 
   /* ---- formatting ---- */
   function fmtSize(bytes) {
@@ -567,6 +621,98 @@
   $("btn-all").addEventListener("click", function () {
     window.location.href = "/api/download-all";
   });
+
+  /* ---- links: list / add / delete ---- */
+  var linksListEl = $("links-list");
+
+  function loadLinks() {
+    $("links-tally").textContent = "Loading...";
+    fetch("/api/links")
+      .then(function (r) { return r.json(); })
+      .then(function (data) { renderLinks(data.links || []); })
+      .catch(function () { $("links-tally").textContent = "Could not load links."; });
+  }
+
+  function renderLinks(links) {
+    $("links-tally").innerHTML = links.length
+      ? "<b>" + links.length + "</b> link" + (links.length === 1 ? "" : "s")
+      : "<b>0</b> links";
+
+    if (!links.length) {
+      linksListEl.innerHTML =
+        '<div class="empty">' +
+          '<div class="big">No links yet</div>' +
+          '<div class="small">Paste a URL above to share it with your ' +
+          'other device.</div>' +
+        '</div>';
+      return;
+    }
+
+    linksListEl.innerHTML = "";
+    links.forEach(function (link) {
+      var row = document.createElement("a");
+      row.className = "row";
+      row.href = link.url;
+      row.target = "_blank";
+      row.rel = "noopener";
+
+      row.innerHTML =
+        '<div class="linkface">&#128279;</div>' +
+        '<div class="meta">' +
+          '<div class="fname">' + escapeHtml(link.title || link.url) + '</div>' +
+          '<div class="fsub">' + escapeHtml(link.source) + ' &middot; ' +
+            ago(link.created) + '</div>' +
+        '</div>' +
+        '<div class="rowact">' +
+          '<button class="icon danger" aria-label="Delete link" ' +
+             'title="Delete">&times;</button>' +
+        '</div>';
+
+      var delBtn = row.querySelector("button.danger");
+      delBtn.addEventListener("click", function (e) {
+        // The button lives inside an anchor; stop the tap from opening the URL.
+        e.preventDefault();
+        e.stopPropagation();
+        deleteLink(link.id, row);
+      });
+      linksListEl.appendChild(row);
+    });
+  }
+
+  function addLink() {
+    var urlEl = $("link-url"), titleEl = $("link-title");
+    var url = urlEl.value.trim();
+    if (!url) { urlEl.focus(); return; }
+    fetch("/api/links", {
+      method: "POST",
+      headers: { "X-AirBridge": "1", "Content-Type": "application/json" },
+      body: JSON.stringify({ url: url, title: titleEl.value.trim() }),
+    })
+      .then(function (r) {
+        if (r.ok) { urlEl.value = ""; titleEl.value = ""; loadLinks(); }
+        else alert("Could not add that link. Use an http or https URL.");
+      })
+      .catch(function () { alert("Could not add that link."); });
+  }
+
+  function deleteLink(id, row) {
+    if (!confirm("Remove this link?")) return;
+    fetch("/api/links/" + encodeURIComponent(id), {
+      method: "DELETE",
+      headers: { "X-AirBridge": "1" },
+    })
+      .then(function (r) {
+        if (r.ok) { row.remove(); loadLinks(); }
+        else alert("Could not remove that link.");
+      })
+      .catch(function () { alert("Could not remove that link."); });
+  }
+
+  $("link-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    addLink();
+  });
+  $("btn-links-refresh").addEventListener("click", loadLinks);
 
   setMode("send");
 })();
