@@ -259,6 +259,7 @@
   .icon:hover { border-color: var(--faint); color: var(--text); }
   .icon.danger:hover { border-color: var(--danger); color: var(--danger); }
   .icon:focus-visible { outline: 2px solid var(--recv); outline-offset: 2px; }
+  .icon:disabled { opacity: .5; cursor: default; }
 
   .empty {
     text-align: center; color: var(--muted);
@@ -533,6 +534,42 @@
   /* ---- receive: list / download / delete ---- */
   var thumbsEnabled = false;
 
+  /* Web Share API with files needs a secure context, so this is true only
+     in HTTPS mode on a browser that supports it (iOS Safari). */
+  var canShare = location.protocol === "https:" && typeof navigator.share === "function";
+
+  var SHAREABLE = {
+    jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+    webp: "image/webp", heic: "image/heic", heif: "image/heif",
+    avif: "image/avif", bmp: "image/bmp",
+    mp4: "video/mp4", mov: "video/quicktime", m4v: "video/x-m4v",
+    avi: "video/x-msvideo", mkv: "video/x-matroska",
+  };
+
+  function shareFile(name, mime, btn) {
+    btn.disabled = true;
+    btn.innerHTML = "&#8230;";
+    function restore() {
+      btn.disabled = false;
+      btn.innerHTML = "&#8679;";
+    }
+    fetch("/api/download/" + encodeURIComponent(name))
+      .then(function (r) {
+        if (!r.ok) throw new Error("download failed: " + r.status);
+        return r.blob();
+      })
+      .then(function (blob) {
+        var file = new File([blob], name, { type: mime });
+        return navigator.share({ files: [file] });
+      })
+      .then(restore)
+      .catch(function (err) {
+        restore();
+        if (err && err.name === "AbortError") return;
+        window.location.href = "/api/download/" + encodeURIComponent(name);
+      });
+  }
+
   function loadFiles() {
     $("tally").textContent = "Loading...";
     fetch("/api/files")
@@ -575,6 +612,14 @@
         ? '<img class="thumb" loading="lazy" alt="" src="' + previewSrc + '">'
         : '<div class="badge">' + escapeHtml(f.ext) + '</div>';
 
+      var mime = canShare ? SHAREABLE[f.ext.toLowerCase()] : null;
+      var getAction = mime
+        ? '<button class="icon share" ' +
+             'aria-label="Save ' + escapeHtml(name) + ' to Photos" ' +
+             'title="Save to Photos">&#8679;</button>'
+        : '<a class="icon" href="/api/download/' + enc + '" download ' +
+             'aria-label="Download ' + escapeHtml(name) + '" title="Download">&#8595;</a>';
+
       row.innerHTML =
         media +
         '<div class="meta">' +
@@ -582,8 +627,7 @@
           '<div class="fsub">' + fmtSize(f.size) + ' &middot; ' + ago(f.modified) + '</div>' +
         '</div>' +
         '<div class="rowact">' +
-          '<a class="icon" href="/api/download/' + enc + '" download ' +
-             'aria-label="Download ' + escapeHtml(name) + '" title="Download">&#8595;</a>' +
+          getAction +
           '<button class="icon danger" data-name="' + escapeHtml(name) + '" ' +
              'aria-label="Delete ' + escapeHtml(name) + '" title="Delete">&times;</button>' +
         '</div>';
@@ -595,6 +639,12 @@
           badge.className = "badge";
           badge.textContent = f.ext;
           img.replaceWith(badge);
+        });
+      }
+      var shareBtn = row.querySelector("button.share");
+      if (shareBtn) {
+        shareBtn.addEventListener("click", function () {
+          shareFile(name, mime, shareBtn);
         });
       }
       row.querySelector("button.danger").addEventListener("click", function () {
