@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -73,6 +74,11 @@ PREVIEWABLE = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
     ".heic", ".heif", ".avif", ".svg",
 }
+
+# Video suffixes that get a frame-grab thumbnail when the optional
+# 'videothumbs' extra (imageio-ffmpeg) is installed. Kept in sync with the
+# share-to-Photos list in web/index.html.
+VIDEO_PREVIEWABLE = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
 
 # NTFS forbids these characters in a filename, plus ASCII control chars.
 _ILLEGAL_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -231,6 +237,46 @@ def thumbnails_available() -> bool:
     added there by registering pillow-heif when it is present.
     """
     return importlib.util.find_spec("PIL") is not None
+
+
+@functools.lru_cache(maxsize=1)
+def video_thumbnails_available() -> bool:
+    """True when the optional 'videothumbs' extra (imageio-ffmpeg) is installed."""
+    return importlib.util.find_spec("imageio_ffmpeg") is not None
+
+
+def build_video_thumbnail(src: Path, dest: Path) -> None:
+    """Write a small JPEG thumbnail of a video's first second to dest.
+
+    Runs the ffmpeg binary bundled by imageio-ffmpeg to grab one frame,
+    scaled so the longest side is THUMB_MAX. Tries a one-second seek first
+    (skips black lead-in frames), then falls back to the very first frame
+    for clips shorter than that. Raises on any failure so the caller can
+    fall back to the client-side type badge.
+    """
+    import imageio_ffmpeg
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    scale = f"scale=w={THUMB_MAX}:h={THUMB_MAX}:force_original_aspect_ratio=decrease"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Never flash a console window when running under the windowed tray exe.
+    no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    for seek in (["-ss", "1"], []):
+        cmd = [
+            ffmpeg, "-y", "-loglevel", "error", *seek,
+            "-i", str(src), "-frames:v", "1", "-vf", scale, str(dest),
+        ]
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, timeout=20, creationflags=no_window
+            )
+        except subprocess.TimeoutExpired:
+            break
+        if result.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
+            return
+    dest.unlink(missing_ok=True)
+    raise RuntimeError(f"ffmpeg could not extract a frame from {src.name}")
 
 
 def build_thumbnail(src: Path, dest: Path) -> None:
@@ -421,17 +467,22 @@ async def list_files():
         if not path.is_file():
             continue
         stat = path.stat()
+        suffix = path.suffix.lower()
         items.append(
             {
                 "name": path.name,
                 "size": stat.st_size,
                 "modified": stat.st_mtime,
-                "previewable": path.suffix.lower() in PREVIEWABLE,
+                "previewable": suffix in PREVIEWABLE
+                or (suffix in VIDEO_PREVIEWABLE and video_thumbnails_available()),
                 "ext": path.suffix.lstrip(".").upper() or "FILE",
             }
         )
     items.sort(key=lambda item: item["modified"], reverse=True)
-    return {"files": items, "thumbnails": thumbnails_available()}
+    return {
+        "files": items,
+        "thumbnails": thumbnails_available() or video_thumbnails_available(),
+    }
 
 
 @app.get("/api/raw/{name}")
@@ -445,17 +496,24 @@ async def raw(name: str):
 
 @app.get("/api/thumb/{name}")
 async def thumb(name: str):
-    """Serve a small JPEG thumbnail for an image, generating and caching it.
+    """Serve a small JPEG thumbnail for an image or video, cached by mtime.
 
-    Falls back to serving the original file inline when the thumbnails extra is
-    not installed or the image cannot be decoded (for example SVG), so a preview
-    still appears and the client badge fallback still applies.
+    Images fall back to serving the original file inline when the thumbnails
+    extra is not installed or the image cannot be decoded (for example SVG),
+    so a preview still appears and the client badge fallback still applies.
+    Videos never fall back to the original (that would stream megabytes into
+    an img tag that cannot render them); they 404 instead, which the client
+    turns into a type badge.
     """
     path = resolve_in_shared(name)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found")
 
-    if not thumbnails_available():
+    is_video = path.suffix.lower() in VIDEO_PREVIEWABLE
+    if is_video:
+        if not video_thumbnails_available():
+            raise HTTPException(status_code=404, detail="No video thumbnails")
+    elif not thumbnails_available():
         return FileResponse(path, content_disposition_type="inline")
 
     mtime_ns = path.stat().st_mtime_ns
@@ -464,8 +522,13 @@ async def thumb(name: str):
 
     if not cache_path.is_file():
         try:
-            build_thumbnail(path, cache_path)
+            if is_video:
+                build_video_thumbnail(path, cache_path)
+            else:
+                build_thumbnail(path, cache_path)
         except Exception:
+            if is_video:
+                raise HTTPException(status_code=404, detail="Frame grab failed")
             # Unsupported format or decode error: serve the original inline.
             return FileResponse(path, content_disposition_type="inline")
 

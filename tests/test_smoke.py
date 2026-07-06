@@ -7,8 +7,10 @@ Run with: uv run pytest
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import socket
+import subprocess
 import urllib.request
 import uuid
 import winreg
@@ -229,6 +231,77 @@ def test_server_lifecycle(tmp_path: Path) -> None:
     assert controller.running
     controller.stop()
     assert not controller.running
+
+
+# --------------------------------------------------------------------------- #
+# Video thumbnails (optional videothumbs extra; skipped when not installed)
+# --------------------------------------------------------------------------- #
+def make_test_video(dest: Path) -> None:
+    """Render a half-second synthetic clip with the bundled ffmpeg.
+
+    Kept under one second on purpose: it also exercises the retry path in
+    build_video_thumbnail where the one-second seek finds no frame.
+    """
+    import imageio_ffmpeg
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    subprocess.run(
+        [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=duration=0.5:size=64x48:rate=10",
+            str(dest),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+
+def test_build_video_thumbnail(tmp_path: Path) -> None:
+    pytest.importorskip("imageio_ffmpeg")
+    video = tmp_path / "clip.mp4"
+    make_test_video(video)
+    dest = tmp_path / "thumb.jpg"
+    airbridge.build_video_thumbnail(video, dest)
+    assert dest.read_bytes()[:2] == b"\xff\xd8"  # JPEG magic bytes
+
+
+def test_build_video_thumbnail_rejects_garbage(tmp_path: Path) -> None:
+    pytest.importorskip("imageio_ffmpeg")
+    fake = tmp_path / "fake.mov"
+    fake.write_text("not a video")
+    dest = tmp_path / "thumb.jpg"
+    with pytest.raises(Exception):
+        airbridge.build_video_thumbnail(fake, dest)
+    assert not dest.exists()
+
+
+def test_videos_not_previewable_without_extra(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "clip.mov").write_bytes(b"x")
+    monkeypatch.setattr(airbridge.cfg, "shared_dir", tmp_path)
+    monkeypatch.setattr(airbridge, "video_thumbnails_available", lambda: False)
+    data = asyncio.run(airbridge.list_files())
+    assert data["files"][0]["previewable"] is False
+
+
+def test_video_thumbnail_endpoint(tmp_path: Path) -> None:
+    pytest.importorskip("imageio_ffmpeg")
+    make_test_video(tmp_path / "clip.mp4")
+    controller = tray.ServerController(make_args(port=free_port(), dir=str(tmp_path)))
+    start_on_free_port(controller)
+    try:
+        base = f"http://127.0.0.1:{controller.port}"
+        with urllib.request.urlopen(f"{base}/api/files", timeout=5) as resp:
+            data = json.loads(resp.read())
+        assert data["thumbnails"] is True
+        assert data["files"][0]["previewable"] is True
+
+        with urllib.request.urlopen(f"{base}/api/thumb/clip.mp4", timeout=30) as resp:
+            assert resp.status == 200
+            assert resp.headers["content-type"] == "image/jpeg"
+            assert resp.read()[:2] == b"\xff\xd8"
+    finally:
+        controller.stop()
 
 
 # The server thread raising on the busy port is the behavior under test.
