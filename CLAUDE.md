@@ -61,8 +61,9 @@ and `FROZEN` from `main.py` rather than building paths from `BASE_DIR`.
 - `run.bat` ............ Windows launcher (`uv run main.py %*`).
 - `tray_run.bat` ....... tray launcher (syncs all extras, tray.py self-detaches).
 - `tests/` ............. pytest smoke tests (helpers, registry, server lifecycle).
-- `airbridge.spec` ..... PyInstaller build (onedir, windowed, bundles web/).
+- `airbridge.spec` ..... PyInstaller build (onedir, windowed, bundles web/ and ffmpeg).
 - `installer.iss` ...... Inno Setup installer (per-user, start-at-login task).
 - `build_assets/` ...... make_ico.py, generates the .ico from tray.make_icon.
 - `.github/workflows/` . ci.yml (tests) and release.yml (installer on v* tags).
-- `README.md` .......... end-user setup first, developer docs below the fold.
+- `README.md` .......... end users only: install, everyday use, kept Apple-clean.
+- `DEVELOPING.md` ...... developer docs: source run, CLI flags, extras, build, release.
