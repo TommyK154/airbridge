@@ -17,6 +17,7 @@ and the login toggle registers the exe itself.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import secrets
@@ -28,6 +29,7 @@ import time
 import tkinter as tk
 import webbrowser
 import winreg
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import messagebox
 
@@ -331,6 +333,146 @@ def make_qr_image(url: str) -> Image.Image:
 
 
 # --------------------------------------------------------------------------- #
+# QR popup placement: pure geometry plus Win32 cursor / work-area adapters
+# --------------------------------------------------------------------------- #
+MONITOR_DEFAULTTONEAREST = 2
+SPI_GETWORKAREA = 0x0030
+
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class RECT(ctypes.Structure):
+    _fields_ = [
+        ("left", wintypes.LONG),
+        ("top", wintypes.LONG),
+        ("right", wintypes.LONG),
+        ("bottom", wintypes.LONG),
+    ]
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", RECT),
+        ("rcWork", RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
+def compute_popup_position(
+    win_w: int,
+    win_h: int,
+    work_area: tuple[int, int, int, int],
+    anchor: tuple[int, int] | None = None,
+    margin: int = 12,
+) -> tuple[int, int]:
+    """Place a win_w by win_h popup inside work_area, returning its top-left.
+
+    work_area is (left, top, right, bottom) in virtual-screen coordinates and
+    may have a negative origin. With an anchor (for example the cursor) the
+    popup is laid up and to the left of it; with anchor None it sits in the
+    margin-inset bottom-right corner. Pure and deterministic: no I/O, no
+    ctypes, no tkinter. Each axis uses the same independent logic.
+    """
+
+    def place(size: int, lo: int, hi: int, anchor_pt: int | None) -> int:
+        if anchor_pt is not None:
+            target = anchor_pt - margin - size
+        else:
+            target = hi - margin - size
+        avail = hi - lo
+        if size >= avail:
+            # Cannot fit: pin to the origin so we never overflow further out.
+            return lo
+        if size + 2 * margin <= avail:
+            # Room for the full margin band on this axis.
+            return max(lo + margin, min(target, hi - margin - size))
+        # Fits, but not with two margins: let the margins collapse, stay inside.
+        return max(lo, min(target, hi - size))
+
+    left, top, right, bottom = work_area
+    anchor_x = anchor[0] if anchor is not None else None
+    anchor_y = anchor[1] if anchor is not None else None
+    x = place(win_w, left, right, anchor_x)
+    y = place(win_h, top, bottom, anchor_y)
+    return (int(x), int(y))
+
+
+def get_cursor_pos() -> tuple[int, int] | None:
+    """Return the mouse position as (x, y) in virtual-screen coordinates.
+
+    None off Windows or if the Win32 call fails, never raising.
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        point = POINT()
+        if not user32.GetCursorPos(ctypes.byref(point)):
+            return None
+        return (int(point.x), int(point.y))
+    except Exception:
+        return None
+
+
+def get_work_area(
+    point: tuple[int, int] | None = None,
+) -> tuple[int, int, int, int] | None:
+    """Return a usable work area (l, t, r, b), taskbars excluded.
+
+    With a point, resolve the nearest monitor under it and return that
+    monitor's work area, so the popup lands on the cursor's screen. Without a
+    point, or if the per-monitor path fails, fall back to the primary monitor
+    via SystemParametersInfoW. None off Windows or if both paths fail, never
+    raising.
+    """
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:
+        return None
+
+    if point is not None:
+        try:
+            user32.MonitorFromPoint.argtypes = [POINT, wintypes.DWORD]
+            user32.MonitorFromPoint.restype = wintypes.HMONITOR
+            user32.GetMonitorInfoW.argtypes = [
+                wintypes.HMONITOR,
+                ctypes.POINTER(MONITORINFO),
+            ]
+            user32.GetMonitorInfoW.restype = wintypes.BOOL
+            monitor = user32.MonitorFromPoint(
+                POINT(point[0], point[1]), MONITOR_DEFAULTTONEAREST
+            )
+            if monitor:
+                info = MONITORINFO()
+                info.cbSize = ctypes.sizeof(MONITORINFO)
+                if user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    r = info.rcWork
+                    return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+        except Exception:
+            pass  # fall through to the primary-monitor work area
+
+    try:
+        user32.SystemParametersInfoW.argtypes = [
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.c_void_p,
+            wintypes.UINT,
+        ]
+        user32.SystemParametersInfoW.restype = wintypes.BOOL
+        work = RECT()
+        if not user32.SystemParametersInfoW(
+            SPI_GETWORKAREA, 0, ctypes.byref(work), 0
+        ):
+            return None
+        return (int(work.left), int(work.top), int(work.right), int(work.bottom))
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Tray application: pystray runs detached, tkinter owns the main thread
 # --------------------------------------------------------------------------- #
 class TrayApp:
@@ -428,7 +570,7 @@ class TrayApp:
         self._refresh()
         self.icon.notify(f"Server running at {self.controller.base}", "AirBridge")
         if show_qr:
-            self._on_ui(self._show_qr)
+            self._on_ui(self._show_qr, False)
 
     def _on_stop(self, icon=None, item=None) -> None:
         threading.Thread(target=self._stop_server, daemon=True).start()
@@ -442,7 +584,22 @@ class TrayApp:
     def _on_show_qr(self, icon=None, item=None) -> None:
         self._on_ui(self._show_qr)
 
-    def _show_qr(self) -> None:
+    def _position_qr_window(self, win: tk.Toplevel, use_cursor: bool) -> None:
+        """Move win to its computed spot near the cursor (or bottom-right).
+
+        Falls back to a full-screen rect when the Win32 work area is
+        unavailable, so placement still stays on screen.
+        """
+        win.update_idletasks()
+        w, h = win.winfo_reqwidth(), win.winfo_reqheight()
+        anchor = get_cursor_pos() if use_cursor else None
+        wa = get_work_area(anchor)
+        if wa is None:
+            wa = (0, 0, win.winfo_screenwidth(), win.winfo_screenheight())
+        x, y = compute_popup_position(w, h, wa, anchor)
+        win.geometry(f"+{x}+{y}")
+
+    def _show_qr(self, use_cursor: bool = True) -> None:
         if self.qr_window is not None and self.qr_window.winfo_exists():
             self.qr_window.destroy()  # rebuild: the URL changes per start
         if not self.controller.running:
@@ -456,6 +613,7 @@ class TrayApp:
 
         url = self.controller.url
         win = tk.Toplevel(self.root)
+        win.withdraw()  # stay hidden until positioned, so it cannot flash at the cascade spot
         win.title("AirBridge: scan to connect")
         win.resizable(False, False)
         win.attributes("-topmost", True)
@@ -477,6 +635,9 @@ class TrayApp:
             self.root.clipboard_append(url)
 
         tk.Button(win, text="Copy URL", command=copy_url).pack(pady=(0, 12))
+
+        self._position_qr_window(win, use_cursor)
+        win.deiconify()
 
     def _on_open_browser(self, icon=None, item=None) -> None:
         if self.controller.running:
