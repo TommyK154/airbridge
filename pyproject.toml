@@ -1,6 +1,6 @@
 [project]
 name = "airbridge"
-version = "1.1.0"
+version = "1.2.0"
 description = "LAN photo and file bridge between a phone and a Windows desktop over Wi-Fi"
 readme = "README.md"
 requires-python = ">=3.10"
